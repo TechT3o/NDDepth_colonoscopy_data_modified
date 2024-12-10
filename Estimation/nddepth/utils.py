@@ -4,12 +4,14 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import Sampler
 from torchvision import transforms
+import matplotlib
 import matplotlib.pyplot as plt
 import os, sys
 import numpy as np
 import math
 import torch
 from skimage.segmentation import all_felzenszwalb as felz_seg
+
 
 def convert_arg_line_to_args(arg_line):
     for arg in arg_line.split():
@@ -470,6 +472,37 @@ def compute_seg(rgb, aligned_norm, D):
         norm_down = pdist(aligned_norm[:, :, 1:], aligned_norm[:, :, :-1])
         norm_right = pdist(aligned_norm[:, :, :, 1:], aligned_norm[:, :, :, :-1])
 
+        # Print shapes before padding
+        # print("Before padding:")
+        # print("D_down:", D_down.shape)  # Should be [8, 255, 256]
+        # print("D_right:", D_right.shape)  # Should be [8, 256, 255]
+        # print("norm_down:", norm_down.shape)  # Should be [8, 3, 255]
+        # print("norm_right:", norm_right.shape)  # Should be [8, 3, 256]
+
+        norm_down = norm_down.mean(dim=1)  # Shape: [8, 255]
+        norm_right = norm_right.mean(dim=1)  # Shape: [8, 256]
+
+        # Expand norm_down to match D_down
+        norm_down = norm_down.unsqueeze(-1)  # Shape: [8, 255, 1]
+        norm_down = F.pad(norm_down, (0, 255))  # Shape: [8, 255, 256]
+
+        # Expand norm_right to match D_right
+        norm_right = norm_right.unsqueeze(-1)  # Shape: [8,256, 1]
+        norm_right = F.pad(norm_right, (0, 254))  # Shape: [8, 256, 255]
+
+        # Pad norm_down to match D_down
+        # norm_down = F.pad(norm_down, (0, 1))  # Pad width (right)
+        #
+        # # Pad norm_right to match D_right
+        # norm_right = F.pad(norm_right, (0, 0, 0, 1))  # Pad height (bottom)
+
+        # Print shapes before padding
+        # print("After padding:")
+        # print("D_down:", D_down.shape)  # Should be [8, 255, 256]
+        # print("D_right:", D_right.shape)  # Should be [8, 256, 255]
+        # print("norm_down:", norm_down.shape)  # Should be [8, 3, 255]
+        # print("norm_right:", norm_right.shape)  # Should be [8, 3, 256]
+
         D_down = torch.stack([normalize(D_down[i]) for i in range(b)])
         norm_down = torch.stack([normalize(norm_down[i]) for i in range(b)])
 
@@ -484,17 +517,17 @@ def compute_seg(rgb, aligned_norm, D):
 
         cost_down = normD_down
         cost_right = normD_right
-        
+
         # get dissimilarity map visualization
         dst = cost_down[:,  :,  : -1] + cost_right[ :, :-1, :]
-        
+
         # felz_seg
         cost_down_np = cost_down.detach().cpu().numpy()
         cost_right_np = cost_right.detach().cpu().numpy()
         segment = torch.stack([torch.from_numpy(felz_seg(normalize(cost_down_np[i]), normalize(cost_right_np[i]), 0, 0, h, w, scale=1, min_size=50)).to(device) for i in range(b)])
         segment += 1
         segment = segment.unsqueeze(1)
-        
+
         # generate mask for segment with area larger than 200
         max_num = segment.max().item() + 1
 
@@ -514,6 +547,108 @@ def compute_seg(rgb, aligned_norm, D):
         return segment, planar_mask, dst.unsqueeze(1)
 
 
+# def compute_seg(rgb, aligned_norm, D):
+#     """
+#     inputs:
+#         rgb                 b, 3, H, W
+#         aligned_norm        b, 3, H, W
+#         D                   b, H, W
+#
+#     outputs:
+#         segment                b, 1, H, W
+#         planar mask        b, 1, H, W
+#     """
+#     b, _, h, w = rgb.shape
+#     device = rgb.device
+#
+#     # compute cost
+#     pdist = nn.PairwiseDistance(p=2)
+#
+#     D_down = abs(D[:, 1:] - D[:, :-1])
+#     D_right = abs(D[:, :, 1:] - D[:, :, :-1])
+#     norm_down = pdist(aligned_norm[:, :, 1:], aligned_norm[:, :, :-1])
+#     norm_right = pdist(aligned_norm[:, :, :, 1:], aligned_norm[:, :, :, :-1])
+#
+#     print("Before padding:")
+#     print("D_down:", D_down.shape)  # Should be [8, 255, 256]
+#     print("D_right:", D_right.shape)  # Should be [8, 256, 255]
+#     print("norm_down:", norm_down.shape)  # Should be [8, 3, 255]
+#     print("norm_right:", norm_right.shape)  # Should be [8, 3, 256]
+#
+#     # Pad depth and normal differences
+#     D_down = F.pad(D_down, (0, 0, 0, 1))  # Pad height (bottom)
+#     D_right = F.pad(D_right, (0, 1, 0, 0))  # Pad width (right)
+#
+#     # Correctly pad norm_down (height)
+#     norm_down = norm_down.mean(dim=1)  # Shape: [8, 255]
+#     norm_right = norm_right.mean(dim=1)  # Shape: [8, 256]
+#     # norm_right = F.pad(norm_right, (0, 1))  # Shape: [8, 256]
+#     norm_down = F.pad(norm_down, (0, 1))  # Shape: [8, 3, 256]
+#     norm_down = norm_down.unsqueeze(1)  # Shape: [8, 1, 256]
+#     norm_right = norm_right.unsqueeze(1)  # Shape: [8, 1, 256]
+#
+#     # Debug: Print shapes after padding
+#     print("After padding:")
+#     print("D_down:", D_down.shape)  # Expected: [8, 256, 256]
+#     print("D_right:", D_right.shape)  # Expected: [8, 256, 256]
+#     print("norm_down:", norm_down.shape)  # Expected: [8, 3, 256]
+#     print("norm_right:", norm_right.shape)  # Expected: [8, 3, 256]
+#
+#     D_down = torch.stack([normalize(D_down[i]) for i in range(b)])
+#     norm_down = torch.stack([normalize(norm_down[i]) for i in range(b)])
+#
+#     D_right = torch.stack([normalize(D_right[i]) for i in range(b)])
+#     norm_right = torch.stack([normalize(norm_right[i]) for i in range(b)])
+#
+#     normD_down = D_down + norm_down
+#     normD_right = D_right + norm_right
+#
+#     normD_down = torch.stack([normalize(normD_down[i]) for i in range(b)])
+#     normD_right = torch.stack([normalize(normD_right[i]) for i in range(b)])
+#
+#     cost_down = normD_down
+#     cost_right = normD_right
+#
+#     # get dissimilarity map visualization
+#     # dst = cost_down[:,  :,  : -1] + cost_right[ :, :-1, :]
+#     dst = cost_down[:, :-1, :-1] + cost_right[:, :-1, :-1]
+#
+#     # felz_seg
+#     cost_down_np = cost_down.detach().cpu().numpy()
+#     cost_right_np = cost_right.detach().cpu().numpy()
+#
+#     for i in range(b):
+#         print(f"cost_down_np[{i}]:", cost_down_np[i].shape)
+#         print(f"cost_right_np[{i}]:", cost_right_np[i].shape)
+#         print(f"height: {h}, width: {w}")
+#         print(f"cost_down[{i}]:", cost_down_np[i].shape, "Min:", cost_down_np[i].min(), "Max:",
+#               cost_down_np[i].max())
+#         print(f"cost_right[{i}]:", cost_right_np[i].shape, "Min:", cost_right_np[i].min(), "Max:",
+#               cost_right_np[i].max())
+#
+#     segment = torch.stack([torch.from_numpy(
+#         felz_seg(normalize(cost_down_np[i]), normalize(cost_right_np[i]), 0, 0, h, w, scale=1, min_size=50)).to(device)
+#                            for i in range(b)])
+#     segment += 1
+#     segment = segment.unsqueeze(1)
+#
+#     # generate mask for segment with area larger than 200
+#     max_num = segment.max().item() + 1
+#
+#     area = torch.zeros((b, max_num)).to(device)
+#     area.scatter_add_(1, segment.view(b, -1), torch.ones((b, 1, h, w)).view(b, -1).to(device))
+#
+#     planar_area_thresh = 200
+#     valid_mask = (area > planar_area_thresh).float()
+#     planar_mask = torch.gather(valid_mask, 1, segment.view(b, -1))
+#     planar_mask = planar_mask.view(b, 1, h, w)
+#
+#     planar_mask[:, :, :8, :] = 0
+#     planar_mask[:, :, -8:, :] = 0
+#     planar_mask[:, :, :, :8] = 0
+#     planar_mask[:, :, :, -8:] = 0
+#
+#     return segment, planar_mask, dst.unsqueeze(1)
 def get_smooth_ND(normal, distance, planar_mask):
     
     """Computes the smoothness loss for normal and distance

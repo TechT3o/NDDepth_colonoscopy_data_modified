@@ -1,0 +1,29 @@
+--mode train
+--model_name nddepth_ucl
+--encoder large07
+--pretrain swin_large_patch4_window7_224_22k.pth
+--dataset ucl
+--data_path datasets/ucl_depth/
+--gt_path datasets/ucl_depth/depth/
+--filenames_file data_splits/ucl_train_files.txt
+--batch_size 4
+--num_epochs 1
+--learning_rate 2e-5
+--weight_decay 1e-2
+--adam_eps 1e-3
+--num_threads 1
+--input_height 256
+--input_width 256
+--max_depth 10
+--do_random_rotate
+--degree 2.5
+--log_directory ./models/
+
+--log_freq 5
+--do_online_eval
+--eval_freq 10
+--data_path_eval datasets/ucl_depth
+--gt_path_eval datasets/ucl_depth
+--filenames_file_eval data_splits/ucl_val_files.txt
+--min_depth_eval 1e-3
+--max_depth_eval 10

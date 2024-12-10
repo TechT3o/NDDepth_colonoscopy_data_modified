@@ -49,6 +49,8 @@ else:
 
 if args.dataset == 'kitti' or args.dataset == 'nyu':
     from dataloaders.dataloader import NewDataLoader
+if args.dataset == 'ucl':
+    from dataloaders.dataloader_ucl import NewDataLoader
 
 model_dir = os.path.dirname(args.checkpoint_path)
 sys.path.append(model_dir)

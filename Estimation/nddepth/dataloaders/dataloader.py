@@ -9,7 +9,7 @@ import os
 import random
 import copy
 
-from utils import DistributedSamplerNoEvenlyDivisible
+from nddepth.utils import DistributedSamplerNoEvenlyDivisible
 
 
 def _is_pil_image(img):

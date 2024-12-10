@@ -5,7 +5,7 @@ import torch.nn.utils as utils
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
+import shutil
 import os, sys, time
 from telnetlib import IP
 import argparse
@@ -19,7 +19,8 @@ from utils import post_process_depth, flip_lr, silog_loss, DN_to_distance, DN_to
 from networks.NewCRFDepth import NewCRFDepth
 from datetime import datetime
 
-
+# Add the nddepth directory to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'nddepth')))
 parser = argparse.ArgumentParser(description='NDDepth PyTorch implementation.', fromfile_prefix_chars='@')
 parser.convert_arg_line_to_args = convert_arg_line_to_args
 
@@ -29,7 +30,7 @@ parser.add_argument('--encoder',                   type=str,   help='type of enc
 parser.add_argument('--pretrain',                  type=str,   help='path of pretrained encoder', default=None)
 
 # Dataset
-parser.add_argument('--dataset',                   type=str,   help='dataset to train on, kitti or nyu', default='nyu')
+parser.add_argument('--dataset',                   type=str,   help='dataset to train on, kitti, nyu or ucl', default='nyu')
 parser.add_argument('--data_path',                 type=str,   help='path to the data', required=True)
 parser.add_argument('--gt_path',                   type=str,   help='path to the groundtruth data', required=True)
 parser.add_argument('--filenames_file',            type=str,   help='path to the filenames text file', required=True)
@@ -91,6 +92,9 @@ else:
 
 if args.dataset == 'kitti' or args.dataset == 'nyu':
     from dataloaders.dataloader import NewDataLoader
+if args.dataset == 'ucl':
+    from dataloaders.dataloader_ucl import NewDataLoader
+
 
 def online_eval(model, dataloader_eval, gpu, ngpus, group, epoch, post_process=False):
 
@@ -264,7 +268,8 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Logging
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-        writer = SummaryWriter(args.log_directory + '/' + args.model_name + '/summaries', flush_secs=30)
+        writer = SummaryWriter(os.path.join(args.log_directory, args.model_name, 'summaries'), flush_secs=30)
+
         if args.do_online_eval:
             if args.eval_summary_directory != '':
                 eval_summary_path = os.path.join(args.eval_summary_directory, args.model_name)
@@ -299,6 +304,7 @@ def main_worker(gpu, ngpus_per_node, args):
             dataloader.train_sampler.set_epoch(epoch)
 
         for step, sample_batched in enumerate(dataloader.data):
+            # print(sample_batched)
 
             loss = 0
             loss_depth1 = 0
@@ -308,15 +314,20 @@ def main_worker(gpu, ngpus_per_node, args):
 
             before_op_time = time.time()
 
+            print(f"Sample batched keys: {sample_batched.keys()}")
+            # print(f"Sample batched content: {sample_batched}")
+
             image = torch.autograd.Variable(sample_batched['image'].cuda(args.gpu, non_blocking=True))
             depth_gt = torch.autograd.Variable(sample_batched['depth'].cuda(args.gpu, non_blocking=True))
             normal_gt = torch.autograd.Variable(sample_batched['normal'].cuda(args.gpu, non_blocking=True))
+            # normal_gt = calculate_surface_normals(depth_gt, inv_K)
             inv_K = torch.autograd.Variable(sample_batched['inv_K'].cuda(args.gpu, non_blocking=True))
             inv_K_p = torch.autograd.Variable(sample_batched['inv_K_p'].cuda(args.gpu, non_blocking=True))
 
             depth1_list, uncer1_list, depth2_list, uncer2_list, normal_est_norm, distance_est = model(image, inv_K, epoch)
 
-            if args.dataset == 'nyu':
+
+            if args.dataset == 'nyu' or args.dataset == 'ucl':
                 mask = depth_gt > 0.1
             else:
                 mask = depth_gt > 1.0
@@ -358,7 +369,36 @@ def main_worker(gpu, ngpus_per_node, args):
             loss_normal = 5 * ((1 - (normal_gt_norm * normal_est_norm).sum(1, keepdim=True)) * mask.float()).sum() / (mask.float() + 1e-7).sum()
             loss_distance = 0.25 * torch.abs(distance_gt[mask] - distance_est[mask]).mean()
 
+            # print("Image shape", image.shape)
+            # print("Normal shape", normal_est_norm.shape)
+            # print("Distance shape", distance_est.shape)
+
             segment, planar_mask, dissimilarity_map = compute_seg(image, normal_est_norm, distance_est[:, 0])
+
+            if torch.isnan(planar_mask).any() or torch.isinf(planar_mask).any():
+                print("NaN or Inf in planar_mask. Debug compute_seg.")
+                return -1
+
+            import matplotlib.pyplot as plt
+
+            # Assuming `segment` is a tensor in the shape (B, C, H, W) or (B, H, W)
+            # Convert to CPU and numpy for visualization
+            # def visualize_tensor(tensor, title="Segment Output"):
+            #     tensor = tensor.detach().cpu().numpy()
+            #     if tensor.ndim == 4:  # Batch and channel dimension
+            #         tensor = tensor[0, 0]  # Visualize the first batch, first channel
+            #     elif tensor.ndim == 3:  # Batch dimension
+            #         tensor = tensor[0]  # Visualize the first batch
+            #
+            #     plt.imshow(tensor, cmap='viridis')
+            #     plt.colorbar()
+            #     plt.title(title)
+            #     plt.show()
+            #
+            # visualize_tensor(segment, title="Segment Output")
+            # visualize_tensor(planar_mask, title="Planar Mask")
+            # visualize_tensor(dissimilarity_map, title="Dissimilarity Map")
+
             loss_grad_normal, loss_grad_distance = get_smooth_ND(normal_est_norm, distance_est, planar_mask)
 
             loss = (loss_depth1 + loss_depth2) / weights_sum + loss_depth1_0 + loss_depth2_0 + loss_uncer1 + loss_uncer2 + loss_normal + loss_distance + 0.01 * loss_grad_normal + 0.01 * loss_grad_distance
@@ -371,6 +411,18 @@ def main_worker(gpu, ngpus_per_node, args):
                 param_group['lr'] = current_lr
             
             optimizer.step()
+
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                print("NaN or Inf detected in loss. Debugging intermediate values:")
+                print("loss_depth1:", loss_depth1)
+                print("loss_depth2:", loss_depth2)
+                print("loss_uncer1:", loss_uncer1)
+                print("loss_uncer2:", loss_uncer2)
+                print("loss_normal:", loss_normal)
+                print("loss_distance:", loss_distance)
+                print("loss_grad_normal:", loss_grad_normal)
+                print("loss_grad_distance:", loss_grad_distance)
+                print("loss:", loss)
 
             if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
                 print('[epoch][s/s_per_e/gs]: [{}][{}/{}/{}], lr: {:.12f}, loss: {:.12f}'.format(epoch, step, steps_per_epoch, global_step, current_lr, loss))
@@ -409,10 +461,12 @@ def main_worker(gpu, ngpus_per_node, args):
                 time.sleep(0.1)
                 model.eval()
                 with torch.no_grad():
+                    group = None
                     eval_measures = online_eval(model, dataloader_eval, gpu, ngpus_per_node, group, epoch, post_process=True)
                 if eval_measures is not None:
                     exp_name = '%s'%(datetime.now().strftime('%m%d'))
-                    log_txt = os.path.join(args.log_directory + '/' + args.model_name, exp_name+'_logs.txt')
+                    log_txt = os.path.join(args.log_directory, args.model_name, exp_name+'_logs.txt')
+
                     with open(log_txt, 'a') as txtfile:
                         txtfile.write(">>>>>>>>>>>>>>>>>>>>>>>>>Step:%d>>>>>>>>>>>>>>>>>>>>>>>>>\n"%(int(global_step)))
                         txtfile.write("{:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}\n".format('silog', 
@@ -438,7 +492,7 @@ def main_worker(gpu, ngpus_per_node, args):
                         if is_best:
                             old_best_step = best_eval_steps[i]
                             old_best_name = '/model-{}-best_{}_{:.5f}'.format(old_best_step, eval_metrics[i], old_best)
-                            model_path = args.log_directory + '/' + args.model_name + old_best_name
+                            model_path = os.path.join(args.log_directory, args.model_name + old_best_name)
                             if os.path.exists(model_path):
                                 command = 'rm {}'.format(model_path)
                                 os.system(command)
@@ -452,7 +506,7 @@ def main_worker(gpu, ngpus_per_node, args):
                                           'best_eval_measures_lower_better': best_eval_measures_lower_better,
                                           'best_eval_steps': best_eval_steps
                                           }
-                            torch.save(checkpoint, args.log_directory + '/' + args.model_name + model_save_name)
+                            torch.save(checkpoint, os.path.join(args.log_directory, args.model_name + model_save_name))
                     eval_summary_writer.flush()
                 model.train()
                 block_print()
@@ -475,25 +529,48 @@ def main():
         return -1
     
     exp_name = '%s'%(datetime.now().strftime('%m%d'))  
-    args.log_directory = os.path.join(args.log_directory,exp_name)  
-    command = 'mkdir ' + os.path.join(args.log_directory, args.model_name)
-    os.system(command)
+    args.log_directory = os.path.join(args.log_directory, exp_name)
+    os.makedirs(os.path.join(args.log_directory, args.model_name), exist_ok=True)
 
     args_out_path = os.path.join(args.log_directory, args.model_name)
-    command = 'cp ' + sys.argv[1] + ' ' + args_out_path
-    os.system(command)
+    # Linux commands
+    # command = 'cp ' + sys.argv[1] + ' ' + args_out_path
+    # os.system(command)
+
+    # Windows commands
+    shutil.copy(sys.argv[1], args_out_path)
 
     save_files = True
     if save_files:
         aux_out_path = os.path.join(args.log_directory, args.model_name)
         networks_savepath = os.path.join(aux_out_path, 'networks')
         dataloaders_savepath = os.path.join(aux_out_path, 'dataloaders')
-        command = 'cp nddepth/train.py ' + aux_out_path
-        os.system(command)
-        command = 'mkdir -p ' + networks_savepath + ' && cp nddepth/networks/*.py ' + networks_savepath
-        os.system(command)
-        command = 'mkdir -p ' + dataloaders_savepath + ' && cp nddepth/dataloaders/*.py ' + dataloaders_savepath
-        os.system(command)
+
+        # Linux commands
+        # command = 'cp nddepth/train.py ' + aux_out_path
+        # os.system(command)
+        # command = 'mkdir -p ' + networks_savepath + ' && cp nddepth/networks/*.py ' + networks_savepath
+        # os.system(command)
+        # command = 'mkdir -p ' + dataloaders_savepath + ' && cp nddepth/dataloaders/*.py ' + dataloaders_savepath
+        # os.system(command)
+
+        # Windows commands
+        # Copy train.py
+        shutil.copy('nddepth/train.py', aux_out_path)
+
+        # Ensure the directories exist, create them if necessary
+        os.makedirs(networks_savepath, exist_ok=True)
+        os.makedirs(dataloaders_savepath, exist_ok=True)
+
+        # Copy all .py files from networks to networks_savepath
+        for file in os.listdir('nddepth/networks/'):
+            if file.endswith('.py'):
+                shutil.copy(os.path.join('nddepth/networks/', file), networks_savepath)
+
+        # Copy all .py files from dataloaders to dataloaders_savepath
+        for file in os.listdir('nddepth/dataloaders/'):
+            if file.endswith('.py'):
+                shutil.copy(os.path.join('nddepth/dataloaders/', file), dataloaders_savepath)
 
     torch.cuda.empty_cache()
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed

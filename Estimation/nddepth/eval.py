@@ -25,6 +25,7 @@ parser.add_argument('--encoder',                   type=str,   help='type of enc
 parser.add_argument('--checkpoint_path',           type=str,   help='path to a checkpoint to load', default='')
 
 # Dataset
+parser.add_argument('--data_path',                 type=str,   help='path to the data', required=True)
 parser.add_argument('--dataset',                   type=str,   help='dataset to train on, kitti or nyu', default='nyu')
 parser.add_argument('--input_height',              type=int,   help='input height', default=480)
 parser.add_argument('--input_width',               type=int,   help='input width',  default=640)
@@ -54,6 +55,9 @@ else:
 
 if args.dataset == 'kitti' or args.dataset == 'nyu':
     from dataloaders.dataloader import NewDataLoader
+if args.dataset == 'ucl':
+    from dataloaders.dataloader_ucl import NewDataLoader
+
 
 def eval(model, dataloader_eval, epoch=5, post_process=False):
     eval_measures = torch.zeros(10).cuda()
@@ -159,7 +163,6 @@ def main_worker(args):
             print("== No checkpoint found at '{}'".format(args.checkpoint_path))
 
     cudnn.benchmark = True
-
     dataloader_eval = NewDataLoader(args, 'online_eval')
 
     # ===== Evaluation ======

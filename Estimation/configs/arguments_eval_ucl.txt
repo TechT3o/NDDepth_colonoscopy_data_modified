@@ -1,0 +1,14 @@
+--model_name nddepth_ucl
+--encoder large07
+--dataset ucl
+--input_height 256
+--input_width 256
+--max_depth 10
+--data_path datasets/ucl_depth/
+--filenames_file data_splits/ucl_test_files.txt
+--data_path_eval datasets/ucl_depth/
+--gt_path_eval datasets/ucl_depth/
+--filenames_file_eval data_splits/ucl_test_files.txt
+--min_depth_eval 1e-3
+--max_depth_eval 10
+--checkpoint_path models/1207/nddepth_ucl/model-10-best_d1_0.00043
